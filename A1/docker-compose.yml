@@ -1,0 +1,24 @@
+version: '3'
+
+services:
+  container1:
+    image: alfredmerlyn007/cloud_assignment_part_1
+    ports:
+      - 6000:6000
+    volumes:
+      - ./:/etc
+    networks:
+      - alfred
+    
+  container2:
+    image: alfredmerlyn007/cloud_assignment_part_2
+    ports:
+      - 7001:7001
+    volumes:
+      - ./:/etc
+    networks:
+      - alfred
+
+networks:
+  alfred:
+    driver: bridge
