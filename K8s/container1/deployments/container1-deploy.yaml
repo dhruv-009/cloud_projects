@@ -1,0 +1,50 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: container1-production
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: container1
+      role: container1
+  template:
+    metadata:
+      name: container1
+      labels:
+        app: container1
+        role: container1
+    spec:
+      containers:
+      - name: container1
+        image: gcr.io/assignment-k8/container1-image:latest
+        imagePullPolicy: Always
+        resources:
+          limits:
+            memory: "50Mi"
+            cpu: "20m"
+        ports:
+        - name: container1
+          containerPort: 8000
+        env:
+          - name: PORT
+            value: "8000"
+        volumeMounts:
+        - name: data-volume
+          mountPath: /etc
+      volumes:
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: pvc1
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: filestore-csi
+  resources:
+    requests:
+      storage: 1Ti

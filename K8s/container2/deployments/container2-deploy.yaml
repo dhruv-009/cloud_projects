@@ -1,0 +1,38 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: container2-production
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: container2
+      role: container2
+  template:
+    metadata:
+      name: container2
+      labels:
+        app: container2
+        role: container2
+    spec:
+      containers:
+      - name: container2
+        image: gcr.io/assignment-k8/container2-image:latest
+        imagePullPolicy: Always
+        resources:
+          limits:
+            memory: "40Mi"
+            cpu: "40m"
+        ports:
+        - name: container2
+          containerPort: 7001
+        env:
+          - name: PORT
+            value: "7001"
+        volumeMounts:
+        - name: data-volume
+          mountPath: /etc
+      volumes:
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: pvc1
