@@ -1,0 +1,402 @@
+Resources:
+  MyS3Bucket1:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: my-user-image-upload-project
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      
+  SNSTopic:
+        Type: "AWS::SNS::Topic"
+        Properties:
+            DisplayName: "FacialAnalysisTopic"
+            TopicName: "term-assignment-stack-SNSTopic"
+
+  SNSTopicPolicy:
+      Type: "AWS::SNS::TopicPolicy"
+      Properties:
+          PolicyDocument: !Sub "{\"Version\":\"2008-10-17\",\"Id\":\"__default_policy_ID\",\"Statement\":[{\"Sid\":\"__default_statement_ID\",\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"*\"},\"Action\":[\"SNS:GetTopicAttributes\",\"SNS:SetTopicAttributes\",\"SNS:AddPermission\",\"SNS:RemovePermission\",\"SNS:DeleteTopic\",\"SNS:Subscribe\",\"SNS:ListSubscriptionsByTopic\",\"SNS:Publish\"],\"Resource\":\"${SNSTopic}\",\"Condition\":{\"StringEquals\":{\"AWS:SourceOwner\":\"${AWS::AccountId}\"}}}]}"
+          Topics: 
+            - !Ref SNSTopic
+
+  SNSSubscription:
+      Type: "AWS::SNS::Subscription"
+      Properties:
+          TopicArn: !Ref SNSTopic
+          Endpoint: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:sentiment"
+          Protocol: "lambda"
+          Region: !Ref AWS::Region
+
+
+
+  CaptionResultBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: caption-result
+
+  FacesResultBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: faces-result
+
+  SentimentResultBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: sentiment-result
+
+
+  CaptionLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: caption
+      Handler: index.lambda_handler
+      Role: arn:aws:iam::532171169998:role/LabRole 
+      Runtime: python3.10
+      Timeout: 222
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+
+          def lambda_handler(event, context):
+              print(event)
+              bucket_name = event['detail']['bucket']['name']
+              object_key = event['detail']['object']['key']
+              
+              # Call AWS Rekognition to generate a caption for the image
+              caption = generate_caption(bucket_name, object_key)
+              
+              # Store the caption result in the "caption-result" S3 bucket
+              store_caption_result(bucket_name, object_key, caption)
+              return event
+
+          def generate_caption(bucket, key):
+              rekognition = boto3.client('rekognition')
+              
+              # Call DetectLabels API to get labels for the image
+              response = rekognition.detect_labels(Image={'S3Object': {'Bucket': bucket, 'Name': key}})
+              
+              # Extract the first label as the caption
+              if 'Labels' in response and len(response['Labels']) > 0:
+                  caption = response['Labels'][0]['Name']
+              else:
+                  caption = "No caption found."
+              
+              return caption
+
+          def store_caption_result(bucket, key, caption):
+              s3 = boto3.client('s3')
+              result_bucket_name = "caption-result"
+              result_object_key = f"{key.split('.')[0]}-caption.json"
+              
+              # Prepare the caption data as JSON
+              caption_data = {
+                  "image": key,
+                  "caption": caption
+              }
+              s3.put_object(Bucket=result_bucket_name, Key=result_object_key, Body=json.dumps(caption_data))
+
+
+  FacesLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: faces
+      Handler: index.lambda_handler
+      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/LabRole" 
+      Runtime: python3.10
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+
+          def lambda_handler(event, context):
+              bucket_name = event['detail']['bucket']['name']
+              object_key = event['detail']['object']['key']
+              
+              # Call Amazon Rekognition to detect faces in the image
+              faces = detect_faces(bucket_name, object_key)
+              result_file_key = f'{object_key.split(".")[0]}-faces.json'
+              store_result_in_s3("faces-result", result_file_key, faces)  # Use "faces-result" as the bucket name
+              return {
+                  'statusCode': 200,
+                  'body': {
+                      'Faces': faces
+                  }
+              }
+
+          def detect_faces(bucket, key):
+              rekognition = boto3.client('rekognition')
+              
+              # Call DetectFaces API to detect faces in the image
+              response = rekognition.detect_faces(Image={'S3Object': {'Bucket': bucket, 'Name': key}})
+              faces = response['FaceDetails']
+              
+              return faces
+
+          def store_result_in_s3(bucket, key, data):
+              s3 = boto3.resource('s3')
+              json_data = json.dumps(data, indent=2)
+              s3.Object(bucket, key).put(Body=json_data)
+              
+          # def publish_to_sns(topic_arn, message):
+          #     sns = boto3.client('sns')
+          #     response = sns.publish(TopicArn=topic_arn, Message=json.dumps(message))
+          #     return response
+  
+  SentimentLambdaFunction:
+      Type: "AWS::Lambda::Function"
+      Properties:
+          Description: ""
+          FunctionName: "sentiment"
+          Handler: "index.lambda_handler"
+          Architectures: 
+            - "x86_64"
+          Code:
+            ZipFile: |
+              import boto3
+              import json
+
+              def lambda_handler(event, context):
+                  print(event)
+                  sns_message = json.loads(event['Records'][0]['Sns']['Message'])
+                  face_details = sns_message['Faces']
+                  facial_expression = infer_facial_expression(face_details)
+                  bucket_name = 'sentiment-result'  # Replace with your S3 bucket name
+                  object_key = 'face_detection_result.json'  # Replace with the desired key for the result
+                  s3 = boto3.client('s3')
+                  s3.put_object(Bucket=bucket_name, Key=object_key, Body=json.dumps(facial_expression))
+                  return {
+                      'statusCode': 200,
+                      'body': facial_expression
+                  }
+
+              def infer_facial_expression(face_details):
+                  facial_expressions = []
+                  for face in face_details:
+                      mouth_left = face['Landmarks'][2]
+                      mouth_right = face['Landmarks'][3]
+                      mouth_width = abs(mouth_left['X'] - mouth_right['X'])
+                      smile_threshold = 0.2
+                      
+                      # If the mouth width is above the threshold, classify the person as smiling
+                      if mouth_width > smile_threshold:
+                          facial_expressions.append('Smiling')
+                      else:
+                          facial_expressions.append('Not Smiling')
+                  
+                  return facial_expressions
+          MemorySize: 128
+          Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/LabRole"
+          Runtime: "python3.10"
+          Timeout: 3
+          TracingConfig: 
+              Mode: "PassThrough"
+          EphemeralStorage: 
+              Size: 512
+
+  SentimentLambdaFunctionSnsPermission:
+        Type: "AWS::Lambda::Permission"
+        Properties:
+            FunctionName: !GetAtt SentimentLambdaFunction.Arn
+            Action: "lambda:InvokeFunction"
+            Principal: "sns.amazonaws.com"
+            SourceArn: "arn:aws:sns:us-east-1:532171169998:term-assignment-stack-SNSTopic"
+
+
+
+  StepFunctionStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: MyFacialImageProcessingStateMachine 
+      RoleArn: arn:aws:iam::532171169998:role/LabRole  
+      DefinitionString: !Sub |
+        {
+          "Comment": "Facial Image Processing State Machine",
+          "StartAt": "CaptionFunction",
+          "States": {
+            "CaptionFunction": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:us-east-1:532171169998:function:caption",
+              "Next": "FaceDetectionFunction"
+            },
+            "FaceDetectionFunction": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:us-east-1:532171169998:function:faces",
+              "Next": "SNSFunction"
+            },
+            "SNSFunction": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "arn:aws:sns:us-east-1:532171169998:term-assignment-stack-SNSTopic",
+                "Message": {
+                  "Faces.$": "$.body.Faces"
+                }
+              },
+              "End": true
+            }
+          }
+        }
+
+  EventsRule:
+      Type: "AWS::Events::Rule"
+      Properties:
+          Name: "term-assignment-stack-EventBridgeRule-16HPZ4DFWTEY8"
+          Description: "Trigger State Machine when S3 bucket object created."
+          EventPattern: "{\"source\":[\"aws.s3\"],\"detail-type\":[\"Object Created\"],\"detail\":{\"bucket\":{\"name\":[\"my-user-image-upload-project\",\"\"]}}}"
+          State: "ENABLED"
+          Targets: 
+            - 
+              Arn: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:MyFacialImageProcessingStateMachine"
+              Id: "TargetStepFunction"
+              RoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/LabRole"
+          EventBusName: "default"
+          
+  ApiGatewayRestApi:
+        Type: "AWS::ApiGateway::RestApi"
+        Properties:
+            Name: "facedetection"
+            ApiKeySourceType: "HEADER"
+            BinaryMediaTypes: 
+              - "image/jpeg"
+            EndpointConfiguration: 
+                Types: 
+                  - "REGIONAL"
+
+  ApiGatewayStage:
+      Type: "AWS::ApiGateway::Stage"
+      Properties:
+          StageName: "dev"
+          DeploymentId: !Ref ApiGatewayDeployment
+          RestApiId: !Ref ApiGatewayRestApi
+          CacheClusterEnabled: false
+          TracingEnabled: false
+
+  ApiGatewayDeployment:
+      Type: "AWS::ApiGateway::Deployment"
+      Properties:
+          RestApiId: !Ref ApiGatewayRestApi
+      DependsOn:
+          - ApiGatewayMethod
+
+  ApiGatewayResource:
+      Type: "AWS::ApiGateway::Resource"
+      Properties:
+          RestApiId: !Ref ApiGatewayRestApi
+          PathPart: "{bucket}"
+          ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+
+  ApiGatewayResource2:
+      Type: "AWS::ApiGateway::Resource"
+      Properties:
+          RestApiId: !Ref ApiGatewayRestApi
+          PathPart: "{filename}"
+          ParentId: !Ref ApiGatewayResource
+
+  ApiGatewayMethod:
+      Type: "AWS::ApiGateway::Method"
+      Properties:
+          RestApiId: !Ref ApiGatewayRestApi
+          ResourceId: !Ref ApiGatewayResource2
+          HttpMethod: "PUT"
+          AuthorizationType: "NONE"
+          ApiKeyRequired: false
+          RequestParameters: 
+              "method.request.path.bucket": true
+              "method.request.path.filename": true
+          MethodResponses: 
+            - 
+              ResponseModels: 
+                  "application/json": "Empty"
+              StatusCode: "200"
+          Integration: 
+              CacheNamespace: !Ref ApiGatewayResource2
+              Credentials: !Sub "arn:aws:iam::${AWS::AccountId}:role/LabRole"
+              IntegrationHttpMethod: "PUT"
+              IntegrationResponses: 
+                - 
+                  ResponseTemplates: {}
+                  StatusCode: "200"
+              PassthroughBehavior: "WHEN_NO_MATCH"
+              RequestParameters: 
+                  "integration.request.path.bucket": "method.request.path.bucket"
+                  "integration.request.path.key": "method.request.path.filename"
+              TimeoutInMillis: 29000
+              Type: "AWS"
+              Uri: !Sub "arn:aws:apigateway:${AWS::Region}:s3:path/{bucket}/{key}"
+
+  GetApiGatewayRestApi:
+      Type: "AWS::ApiGateway::RestApi"
+      Properties:
+          Name: "result"
+          ApiKeySourceType: "HEADER"
+          EndpointConfiguration: 
+              Types: 
+                - "REGIONAL"
+
+  GetApiGatewayDeployment:
+      Type: "AWS::ApiGateway::Deployment"
+      Properties:
+          RestApiId: !Ref GetApiGatewayRestApi
+      DependsOn:
+          - GetApiGatewayMethod
+
+  GetApiGatewayStage:
+      Type: "AWS::ApiGateway::Stage"
+      Properties:
+          StageName: "result"
+          DeploymentId: !Ref GetApiGatewayDeployment
+          RestApiId: !Ref GetApiGatewayRestApi
+          CacheClusterEnabled: false
+          TracingEnabled: false
+
+  GetApiGatewayResource:
+      Type: "AWS::ApiGateway::Resource"
+      Properties:
+          RestApiId: !Ref GetApiGatewayRestApi
+          PathPart: "{bucket}"
+          ParentId: !GetAtt GetApiGatewayRestApi.RootResourceId
+
+  GetApiGatewayResource2:
+      Type: "AWS::ApiGateway::Resource"
+      Properties:
+          RestApiId: !Ref GetApiGatewayRestApi
+          PathPart: "{key}"
+          ParentId: !Ref GetApiGatewayResource
+
+  GetApiGatewayMethod:
+      Type: "AWS::ApiGateway::Method"
+      Properties:
+          RestApiId: !Ref GetApiGatewayRestApi
+          ResourceId: !Ref GetApiGatewayResource2
+          HttpMethod: "GET"
+          AuthorizationType: "NONE"
+          ApiKeyRequired: false
+          RequestParameters: 
+              "method.request.path.bucket": true
+              "method.request.path.key": true
+          MethodResponses: 
+            - 
+              ResponseModels: 
+                  "application/json": "Empty"
+              StatusCode: "200"
+          Integration: 
+              CacheNamespace: !Ref GetApiGatewayResource2
+              Credentials: !Sub "arn:aws:iam::${AWS::AccountId}:role/LabRole"
+              IntegrationHttpMethod: "GET"
+              IntegrationResponses: 
+                - 
+                  ResponseTemplates: {}
+                  StatusCode: "200"
+              PassthroughBehavior: "WHEN_NO_MATCH"
+              RequestParameters: 
+                  "integration.request.path.bucket": "method.request.path.bucket"
+                  "integration.request.path.key": "method.request.path.key"
+              TimeoutInMillis: 29000
+              Type: "AWS"
+              Uri: !Sub "arn:aws:apigateway:${AWS::Region}:s3:path/{bucket}/{key}"
+Outputs:
+  StepFunctionStateMachineArn:
+    Value: !Ref StepFunctionStateMachine
